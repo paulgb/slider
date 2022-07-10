@@ -1,7 +1,7 @@
-use std::{collections::HashSet, fmt::Debug};
-
+use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 use anyhow::Result;
 use serde::Deserialize;
+use crate::bidirectional_list::BidirectionalList;
 
 #[derive(Deserialize, Debug)]
 pub enum GoalSpecification {
@@ -20,6 +20,7 @@ pub struct PieceSpecification {
 pub struct GameSpecification {
     dimensions: (usize, usize),
     pieces: Vec<PieceSpecification>,
+    #[allow(unused)]
     goal: GoalSpecification,
 }
 
@@ -75,7 +76,7 @@ impl GameBoard {
             }
         }
 
-        return true;
+        true
     }
 
     pub fn clear(&mut self) {
@@ -96,47 +97,103 @@ impl GameSpecification {
         let positions = self.pieces.iter().map(|d| d.position).collect();
         GameConfiguration { positions }
     }
+}
 
-    pub fn valid_neighbors(
-        &self,
-        configuration: &GameConfiguration,
-        board: &mut GameBoard,
-        result_buf: &mut Vec<GameConfiguration>,
+pub struct GraphGenerator {
+    nodes: BidirectionalList<GameConfiguration>,
+    edges: BTreeSet<(usize, usize)>,
+    queue: Vec<usize>,
+    board: GameBoard,
+    specification: GameSpecification,
+}
+
+impl GraphGenerator {
+    pub fn new(specification: GameSpecification) -> Self {
+        let board = GameBoard::new(specification.dimensions);
+        let mut nodes = BidirectionalList::default();
+        let idx = nodes.push(specification.as_configuration());
+        let queue = vec![idx];
+
+        GraphGenerator {
+            specification,
+            nodes,
+            edges: Default::default(),
+            queue,
+            board,
+        }
+    }
+
+    pub fn enqueue_configuration(
+        nodes: &mut BidirectionalList<GameConfiguration>,
+        queue: &mut Vec<usize>,
+        edges: &mut BTreeSet<(usize, usize)>,
+        configuration: GameConfiguration,
+        neighbor: usize,
     ) {
-        result_buf.clear();
-        board.clear();
+        let idx = if let Some(idx) = nodes.get_index(&configuration) {
+            // This configuration has already been visited; don't do anything.
+            idx
+        } else {
+            let idx = nodes.push(configuration);
+            queue.push(idx);
 
-        for (piece, position) in self.pieces.iter().zip(&configuration.positions) {
-            board.place(piece, *position)
+            idx
+        };
+
+        edges.insert((idx.min(neighbor), idx.max(neighbor)));
+    }
+
+    pub fn visit_node(&mut self, idx: usize) {
+        let configuration = self.nodes.get(idx).unwrap().clone();
+        self.board.clear();
+
+        for (piece, position) in self
+            .specification
+            .pieces
+            .iter()
+            .zip(&configuration.positions)
+        {
+            self.board.place(piece, *position)
         }
 
-        //println!("{:?}", board);
-        assert_eq!(18, board.bitmap.iter().filter(|d| **d).count());
+        assert_eq!(18, self.board.bitmap.iter().filter(|d| **d).count());
 
-        for piece_idx in 0..self.pieces.len() {
-            let piece = &self.pieces[piece_idx];
+        for piece_idx in 0..self.specification.pieces.len() {
+            let piece = &self.specification.pieces[piece_idx];
             let position = configuration.positions[piece_idx];
 
             if piece.moves.0 {
                 // Horizontal moves allowed
                 let size = (1, piece.size.1);
 
-                if position.0 > 0 && board.is_rect_clear((position.0 - 1, position.1), size) {
+                if position.0 > 0 && self.board.is_rect_clear((position.0 - 1, position.1), size) {
                     // this piece can move left
-
-                    result_buf.push(configuration.clone());
-                    result_buf.last_mut().unwrap().positions[piece_idx] =
-                        (position.0 - 1, position.1)
+                    let mut configuration = configuration.clone();
+                    configuration.positions[piece_idx] = (position.0 - 1, position.1);
+                    Self::enqueue_configuration(
+                        &mut self.nodes,
+                        &mut self.queue,
+                        &mut self.edges,
+                        configuration,
+                        idx,
+                    );
                 }
 
-                if position.0 + piece.size.0 < board.width
-                    && board.is_rect_clear((position.0 + piece.size.0, position.1), size)
+                if position.0 + piece.size.0 < self.board.width
+                    && self
+                        .board
+                        .is_rect_clear((position.0 + piece.size.0, position.1), size)
                 {
                     // this piece can move right
-
-                    result_buf.push(configuration.clone());
-                    result_buf.last_mut().unwrap().positions[piece_idx] =
-                        (position.0 + 1, position.1)
+                    let mut configuration = configuration.clone();
+                    configuration.positions[piece_idx] = (position.0 + 1, position.1);
+                    Self::enqueue_configuration(
+                        &mut self.nodes,
+                        &mut self.queue,
+                        &mut self.edges,
+                        configuration,
+                        idx,
+                    );
                 }
             }
 
@@ -144,51 +201,61 @@ impl GameSpecification {
                 // Vertical moves allowed
                 let size = (piece.size.0, 1);
 
-                if position.1 > 0 && board.is_rect_clear((position.0, position.1 - 1), size) {
+                if position.1 > 0 && self.board.is_rect_clear((position.0, position.1 - 1), size) {
                     // this piece can move up
-
-                    result_buf.push(configuration.clone());
-                    result_buf.last_mut().unwrap().positions[piece_idx] =
-                        (position.0, position.1 - 1)
+                    let mut configuration = configuration.clone();
+                    configuration.positions[piece_idx] = (position.0, position.1 - 1);
+                    Self::enqueue_configuration(
+                        &mut self.nodes,
+                        &mut self.queue,
+                        &mut self.edges,
+                        configuration,
+                        idx,
+                    );
                 }
 
-                if position.1 + piece.size.1 < board.height
-                    && board.is_rect_clear((position.0, position.1 + piece.size.1), size)
+                if position.1 + piece.size.1 < self.board.height
+                    && self
+                        .board
+                        .is_rect_clear((position.0, position.1 + piece.size.1), size)
                 {
                     // this piece can move down
-
-                    result_buf.push(configuration.clone());
-                    result_buf.last_mut().unwrap().positions[piece_idx] =
-                        (position.0, position.1 + 1)
+                    let mut configuration = configuration.clone();
+                    configuration.positions[piece_idx] = (position.0, position.1 + 1);
+                    Self::enqueue_configuration(
+                        &mut self.nodes,
+                        &mut self.queue,
+                        &mut self.edges,
+                        configuration,
+                        idx,
+                    );
                 }
             }
         }
     }
 
-    pub fn solve(&self) -> Result<()> {
-        let mut visited: HashSet<GameConfiguration> = vec![self.as_configuration()].into_iter().collect();
-        let mut queue: Vec<GameConfiguration> = vec![self.as_configuration()];
-        let mut board: GameBoard = GameBoard::new(self.dimensions);
-        let mut neighbors = Vec::new();
-
+    pub fn generate(
+        &mut self,
+    ) -> Result<(
+        &BidirectionalList<GameConfiguration>,
+        &BTreeSet<(usize, usize)>,
+    )> {
         let mut step: u32 = 0;
-        while !queue.is_empty() {
-            println!("Step: {}, queue size: {}, visited: {}", step, queue.len(), visited.len() - queue.len());
+        while !self.queue.is_empty() {
+            if step % 1_000_000 == 0 {
+                eprintln!(
+                    "Step: {}, queue size: {}, visited: {}",
+                    step,
+                    self.queue.len(),
+                    self.nodes.len() - self.queue.len()
+                );    
+            }
             step += 1;
 
-            let configuration = queue.pop().unwrap();
-            self.valid_neighbors(&configuration, &mut board, &mut neighbors);
-
-            for neighbor in neighbors.drain(..) {
-                if visited.contains(&neighbor) {
-                    continue;
-                } else {
-                    queue.push(neighbor.clone());
-                    visited.insert(neighbor);
-                }
-            }
+            let idx = self.queue.pop().unwrap();
+            self.visit_node(idx);
         }
 
-        Ok(())
+        Ok((&self.nodes, &self.edges))
     }
 }
